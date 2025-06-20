@@ -14,6 +14,9 @@ import numpy as np
 import pandas as pd
 import os
 
+import pretty_midi
+from llama_recipes.datasets.extract_contour import MelodyContourExtractor
+
 def pitch_to_octave_pitch_class(pitch):
     return pitch//12, pitch%12
 
@@ -22,13 +25,17 @@ def octave_pitch_class_to_pitch(octave, pitch_class):
 
 
 class MusicTokenizer():
-    def __init__(self, timeshift_vocab_size = 21, dur_vocab_size = 1001, octave_vocab_size = 9, pitch_class_vocab_size = 12, instrument_vocab_size = 128, velocity_vocab_size = 129, sos_token = -1, eos_token = -2, pad_token = -3):
+    def __init__(self, timeshift_vocab_size = 21, dur_vocab_size = 1001, octave_vocab_size = 9, \
+                 pitch_class_vocab_size = 12, instrument_vocab_size = 128, velocity_vocab_size = 129, \
+                 contour_vocab_size = 3, sos_token = -1, eos_token = -2, pad_token = -3, \
+                 socon_token=-4, eocon_token=-5):
         self.timeshift_vocab_size = timeshift_vocab_size
         self.dur_vocab_size = dur_vocab_size
         self.octave_vocab_size = octave_vocab_size
         self.pitch_class_vocab_size = pitch_class_vocab_size
         self.instrument_vocab_size = instrument_vocab_size
         self.velocity_vocab_size = velocity_vocab_size
+        self.contour_vocab_size = contour_vocab_size
         self.sos_out_vocab_size = 1 #sos token at the output side, only 1 token
         self.sos_out = 0
 
@@ -38,6 +45,12 @@ class MusicTokenizer():
         self.sos_token_compound = [self.sos_token for _ in range(6)]
         self.eos_token_compound = [self.eos_token for _ in range(6)]
         self.pad_token_compound = [self.pad_token for _ in range(6)] 
+        
+            # for contour tokens
+        self.socon_token = socon_token
+        self.eocon_token = eocon_token
+        self.socon_token_compound = [self.socon_token for _ in range(6)]
+        self.eocon_token_compound = [self.eocon_token for _ in range(6)]
 
         #define labels (language tokens)
         self.sos_timeshift, self.eos_timeshift = self.timeshift_vocab_size-2, self.timeshift_vocab_size-1 #TODO think whether this is correct
@@ -48,6 +61,8 @@ class MusicTokenizer():
         self.sos_instrument, self.eos_instrument = self.instrument_vocab_size-2, self.instrument_vocab_size-1
         self.sos_velocity, self.eos_velocity = self.velocity_vocab_size-2, self.velocity_vocab_size-1
 
+        #     # for contour tokens
+        # self.socon_interval, self.eocon_interval = self.contour_vocab_size-2, self.contour_vocab_size-1
 
         self.sos_label = [self.sos_out, self.sos_timeshift, self.sos_dur, self.sos_octave, self.sos_pitch_class, self.sos_instrument, self.sos_velocity]
         self.eos_label = [self.sos_out, self.eos_timeshift, self.eos_dur, self.eos_octave, self.eos_pitch_class, self.eos_instrument, self.eos_velocity]
@@ -69,7 +84,8 @@ class MusicTokenizer():
         self.pitch_dict_decode = {v: k for k, v in self.pitch_dict.items()}
         self.instrument_dict_decode = {v: k for k, v in self.instrument_dict.items()}
         self.velocity_dict_decode = {v: k for k, v in self.velocity_dict.items()}
-
+        # self.interval_dict_decode = {v: k for k, v in self.interval_dict.items()}
+        
     def encode_single(self, raw_token):
         """
         each raw token looks like: [onset_binary_str, duration, [octave, pitch_class],instrument, velocity], ['00000001101100111101', 25, [4, 11], 24, 58] 
@@ -161,13 +177,65 @@ class MusicTokenizer():
         labels = [self.convert_to_language_tokens(x) for x in output]
         return labels
 
-    def encode_series_con_gen_commu(self, raw_token_series, raw_chord_series, metadata_tokens, if_only_keep_condition_tokens = False, if_add_chords_in_transformer = True, if_add_metadata_in_transformer = False):
+    def encode_series_con_gen_commu(self, raw_token_series, raw_chord_series, metadata_tokens, if_only_keep_condition_tokens = False, if_add_chords_in_transformer = True, if_add_metadata_in_transformer = False):        
         # meta_data_tokens,<SOC> chords, <EOC>, <SOS> music_seq, <EOS>   
+        # music_seq: <SOCON> contour tokens <EOCON>
         if not if_only_keep_condition_tokens:
+            print("=== 开始处理音乐序列 ===")
             out = [self.encode_single(x) for x in raw_token_series]
+            print(f"原始token数量: {len(out)}")
+            
+            # extract contour
+            print("=== 开始提取轮廓 ===")
+            raw_melody_sequence = [[onset, duration, 12 * octave + pitch_class, instrument] 
+                                  for onset, duration, octave, pitch_class, instrument, velocity in out]
+            print(f"melody_sequence长度: {len(raw_melody_sequence)}")
+            print(f"melody_sequence前3个: {raw_melody_sequence[:3]}")
+            
+            extractor = MelodyContourExtractor(raw_melody_sequence)
+            contour = extractor.get_final_contour()
+            print(f"提取的轮廓数量: {len(contour)}")
+            print(f"轮廓内容: {contour}")
+            
+            # insert contour tokens
+            print("=== 开始插入轮廓token ===")
+            result = out.copy()
+
+            for contour_item in contour:
+                target_value = contour_item[0]  
+                print(f"寻找目标值: {target_value}")
+                # find the first matching position in result
+                for i, out_item in enumerate(result):
+                    if out_item[0] == target_value:
+                        print(f"找到匹配位置 {i}, 插入轮廓token")
+                        result.insert(i, self.socon_token_compound)
+                        
+                        if contour_item[1] > 0:                       
+                            result.insert(i + 1, [1,0,0,0,0,0])  
+                        elif contour_item[1] == 0:
+                            result.insert(i + 1, [0,1,0,0,0,0])
+                        elif contour_item[1] < 0:
+                            result.insert(i + 1, [0,0,1,0,0,0])
+                
+                        result.insert(i + 2, self.eocon_token_compound)
+                        break
+            
+            out = result
+            
             out = [self.sos_token_compound] + out + [self.eos_token_compound]
+            print("=== 最终结果 ===")
+            print(out)
+            print("=== 程序结束 ===")
+            exit()
         else:
             out = []
+        
+            
+        if if_add_chords_in_transformer:
+            out_chord = [self.encode_single(x) for x in raw_chord_series]
+            out_chord = [self.soc_token_compound] + out_chord + [self.eoc_token_compound]
+        else:
+            out_chord = []
 
         if if_add_chords_in_transformer:
             out_chord = [self.encode_single(x) for x in raw_chord_series]

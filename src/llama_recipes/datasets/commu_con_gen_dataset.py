@@ -45,6 +45,7 @@ class Commu_Con_Gen_Datasets(Dataset):
         encoded_tokens = self.tokenizer.encode_series_con_gen_commu(raw_tokens, raw_tokens_chord, metadata_tokens = metadata_id, if_add_chords_in_transformer = self.if_add_chords_in_transformer, if_add_metadata_in_transformer = self.if_add_metadata_in_transformer)  #meta_data_tokens,<SOC> chords, <EOC>, <SOS> music_seq, <EOS>              
         encoded_tokens_label = self.tokenizer.encode_series_labels_con_gen_commu(encoded_tokens)
 
+        # print(encoded_tokens)
         return {
             "input_ids": encoded_tokens,
             "labels": encoded_tokens_label,
@@ -53,4 +54,35 @@ class Commu_Con_Gen_Datasets(Dataset):
             "attention_mask":[] #Mask to be calculated dynamically during concatenation
         }
 
- 
+
+# # CLI utility for inspecting dataset samples
+# if __name__ == "__main__":
+#     import argparse
+#     from types import SimpleNamespace
+#     from llama_recipes.datasets.music_tokenizer import MusicTokenizer
+
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument("--data_dir", type=str, required=True, help="Path to processed data directory")
+#     parser.add_argument("--csv_file", type=str, required=True, help="Path to metadata CSV file")
+#     parser.add_argument("--partition", type=str, default="train", choices=["train", "val"], help="Dataset split to test")
+#     parser.add_argument("--index", type=int, default=0, help="Index of sample to inspect")
+#     parser.add_argument("--add_chords", action="store_true", help="Include chords in transformer input")
+#     parser.add_argument("--add_metadata", action="store_true", help="Include metadata in transformer input")
+#     args = parser.parse_args()
+
+#     # Create config namespace
+#     config = SimpleNamespace(
+#         data_dir=args.data_dir,
+#         csv_file=args.csv_file,
+#         if_add_chords_in_transformer=args.add_chords,
+#         if_add_metadata_in_transformer=args.add_metadata,
+#     )
+
+#     tokenizer = MusicTokenizer()
+#     dataset = Commu_Con_Gen_Datasets(config, tokenizer, partition=args.partition)
+
+#     sample = dataset[args.index]
+#     print("Encoded Input IDs:\n", sample["input_ids"])
+#     print("Encoded Labels:\n", sample["labels"])
+#     print("Metadata Condition:\n", sample["metadata_condition"])
+#     print("Bar/Beat/Chord Info:\n", sample["bar_beat_chord_condition"])
