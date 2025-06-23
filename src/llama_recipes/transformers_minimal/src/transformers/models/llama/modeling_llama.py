@@ -1430,7 +1430,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 where_new_token = where_new_tokens_dict[token_id]
                 # Replace the new token in input_ids_tmp
                 input_ids_tmp = torch.where(where_new_token, torch.tensor([0 for _ in range(6)]).to(input_ids), input_ids_tmp)   
-
+        
         onsets = self.onset_embedding(input_ids_tmp[..., 0])
         durs = self.dur_embedding(input_ids_tmp[..., 1])
         octaves = self.octave_embedding(input_ids_tmp[..., 2]) 
@@ -2015,7 +2015,8 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
-
+    
+    
     def get_input_embeddings(self):
         return self.model.embed_tokens
 
@@ -2209,26 +2210,28 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
                 contour_token_mask_list.append(mask)
 
                 if self.if_add_metadata_in_decoder:
-                    metadata_ids = torch.tensor([additional_token_map[token.item()] for token in metadata_condition[batch_idx]]).to(input_ids)
+                    metadata_ids = torch.tensor([additional_token_map[token.item()] for token in metadata_condition[batch_idx]], 
+                                               device=input_ids.device, dtype=torch.long)
                     metadata_condition_embedded_single = self.model.supplementary_embedding_metadata(metadata_ids).reshape(-1).unsqueeze(0).expand(seq_indices_eos - seq_indices_sos, -1).to(shift_logits_x)
                     metadata_condition_shrinked = self.gru_condition_layer(metadata_condition_embedded_single).unsqueeze(1)
                     metadata_condition_list.append(metadata_condition_shrinked)
 
                 # Extract contour token IDs and map to embedding indices
                 contour_ids = input_ids_subseq[mask]
-                contour_ids_mapped = torch.tensor([additional_token_map[token.item()] for token in contour_ids]).to(input_ids.device)
-                # Use embedding + GRU on each token individually
-                single_embeddings = self.model.supplementary_embedding_metadata(contour_ids_mapped)  # (num_contour, emb_dim)
-                contour_shrinked_single = []
-                for i in range(single_embeddings.shape[0]):
-                    # (1, emb_dim) -> (1, 1, proj_dim)
-                    token_embed = single_embeddings[i].unsqueeze(0)  # (1, emb_dim)
-                    token_shrinked = self.gru_contour_condition_layer(token_embed).unsqueeze(1)  # (1, 1, dim)
-                    contour_shrinked_single.append(token_shrinked)
-                # Reconstruct per-step tensor by padding zeros in non-contour positions
-                contour_shrinked = torch.cat(contour_shrinked_single, dim=0)  # (num_contour, 1, dim)
-                contour_list.append(contour_shrinked)
-                            
+                if contour_ids.numel() > 0:
+                    contour_ids_mapped = torch.tensor([additional_token_map[token.item()] for token in contour_ids], 
+                                                    device=input_ids.device, dtype=torch.long)
+                    # Use embedding + GRU on each token individually
+                    single_embeddings = self.model.supplementary_embedding_metadata(contour_ids_mapped)  # (num_contour, emb_dim)
+                    contour_shrinked_single = []
+                    for i in range(single_embeddings.shape[0]):
+                        # (1, emb_dim) -> (1, 1, proj_dim)
+                        token_embed = single_embeddings[i].unsqueeze(0)  # (1, emb_dim)
+                        token_shrinked = self.gru_contour_condition_layer(token_embed).unsqueeze(1)  # (1, 1, dim)
+                        contour_shrinked_single.append(token_shrinked)
+                    # Reconstruct per-step tensor by padding zeros in non-contour positions
+                    contour_shrinked = torch.cat(contour_shrinked_single, dim=0)  # (num_contour, 1, dim)
+                    contour_list.append(contour_shrinked)
                 
                 if self.if_add_chord_in_decoder:
                     bar_OH = F.one_hot(bar_beat_chord_condition[batch_idx, :seq_indices_eos - seq_indices_sos, 0].long(), num_classes=self.bar_classes).to(input_ids)
@@ -2239,7 +2242,7 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
                             embedded_pitches = self.model.pitch_embedding(torch.tensor(chord_to_midi(chord)).unsqueeze(0).to(input_ids))
                             chord_condition.append(embedded_pitches.sum(dim=1))
                         else:
-                            chord_condition.append(self.chord_placeholder_embedding(torch.tensor([0]).to(input_ids)))
+                            chord_condition.append(self.chord_placeholder_embedding(torch.tensor([0], device=input_ids.device, dtype=torch.long)))
                     chord_condition_cat = torch.cat(chord_condition, dim=0)
                     bar_beat_chord_condition_cat = torch.cat([bar_OH, beat_OH, chord_condition_cat], dim=-1)
                     bar_beat_chord_condition_cat_linear = self.chord_condition_layer(bar_beat_chord_condition_cat).unsqueeze(1)
@@ -2270,7 +2273,6 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
                 if flat_mask.any():
                     contour_ids = token_inputs[flat_mask]
                     mapped_ids = torch.tensor([additional_token_map[t.item()] for t in contour_ids], device=token_inputs.device).long()
-                    print(f"contour_ids_mapped dtype: {contour_ids_mapped.dtype}")  # 应该是 torch.int64
                     contour_embeds = self.model.supplementary_embedding_metadata(mapped_ids)  # (num_contour, emb_dim)
                     contour_single_embeds = []
                     for i in range(contour_embeds.shape[0]):
@@ -2311,7 +2313,7 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
 
                 note_embedded = self.decoder_embedding(note_input)
                 shift_labels_x_y_encoded = torch.zeros_like(note_embedded).new_zeros(shift_labels_x_y.shape[0], shift_labels_x_y.shape[1], note_embedded.shape[-1])
-                shift_labels_x_y_encoded[full_contour_mask] = contour_embedded
+                shift_labels_x_y_encoded[full_contour_mask] = contour_embedded.expand(-1, 6, -1)
                 shift_labels_x_y_encoded[~full_contour_mask] = note_embedded
 
                 if self.if_add_metadata_in_decoder:
@@ -2335,8 +2337,32 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
             shift_labels_x_y[full_contour_mask] = -100                     # (3612,3096)
             loss = self.loss_func(generation_logits, shift_labels_x_y)
             # print(f"loss: {loss}")
+
+            # # 添加详细的调试信息
+            # print(f"shift_labels_x.shape: {shift_labels_x.shape}")
+            # print(f"full_contour_mask shape: {full_contour_mask.shape}")
+            # print(f"full_contour_mask dtype: {full_contour_mask.dtype}")
+            # print(f"full_contour_mask[:50]: {full_contour_mask[:50]}")
+            # print(f"Number of True values in full_contour_mask: {full_contour_mask.sum().item()}")
+            # print(f"Number of False values in full_contour_mask: {(~full_contour_mask).sum().item()}")
+            # print(f"Total elements in full_contour_mask: {full_contour_mask.numel()}")
+            # print(f"Percentage of True values: {(full_contour_mask.sum().item() / full_contour_mask.numel()) * 100:.2f}%")
+            
+            # # 检查是否有任何True值
+            # if full_contour_mask.any():
+            #     print("✅ full_contour_mask contains True values!")
+            #     # 找到True值的位置
+            #     true_indices = full_contour_mask.nonzero(as_tuple=True)[0]
+            #     print(f"First 10 True value indices: {true_indices[:10]}")
+            # else:
+            #     print("❌ full_contour_mask contains NO True values!")
+            
+            # print(f"shift_labels_x_y shape: {shift_labels_x_y.shape}")
+            # print(f"shift_labels_x_y[:20]: {shift_labels_x_y[:20]}")
+            
+            
         
-        # zhangqiaoxi todo: add contour condition for inference()
+        # zqx zhangqiaoxi todo: add contour condition for inference()
         elif decoded_language_tokens is not None and decoded_hidden_state is not None: #else during inference (decoding)--> inference autoregressively, return generated tokens
             if self.decoder_attn_implementation == "GRU":    
                 decoded_language_tokens_encoded = self.decoder_embedding(decoded_language_tokens)##batch*len_x, len_y--> batch*lenx, len_y, dim
@@ -2347,7 +2373,7 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
                             additional_token_map[token.item()] 
                             for batch in metadata_condition # Iterate through the first 11 tokens in each batch
                             for token in batch                  # Iterate through each token in the batch
-                        ])
+                        ], device=input_ids.device, dtype=torch.long)
                     ).reshape(metadata_condition.shape[0] , -1).unsqueeze(1)  # Reshape and move to the same device as input_ids #batch, 11 --> batch, 11, dim --> batch, 11*dim, --> batch, 1, 11*dim
                     metadata_condition_shrinked = self.gru_condition_layer(metadata_condition) #(batch, 1, 11*dim) --> (batch, 1, dim)
                     decoder_input = decoder_input+metadata_condition_shrinked
@@ -2362,7 +2388,7 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
                             embedded_pitches = self.model.pitch_embedding(torch.tensor(chord_to_midi(chord)).unsqueeze(0).to(input_ids)) # (1, num_pitches, dim)
                             chord_condition.append(embedded_pitches.sum(dim = 1)) # (1, dim)
                         else: 
-                            chord_condition.append(self.chord_placeholder_embedding(torch.tensor([0]).to(input_ids))) # (1, dim)
+                            chord_condition.append(self.chord_placeholder_embedding(torch.tensor([0], device=input_ids.device, dtype=torch.long))) # (1, dim)
                     chord_condition_cat = torch.cat(chord_condition, dim = 0) # (batch*len, dim)
                     bar_beat_chord_condition_cat = torch.cat([bar_OH, beat_OH, chord_condition_cat], dim = -1)
                     bar_beat_chord_condition_cat_linear = self.chord_condition_layer(bar_beat_chord_condition_cat).unsqueeze(1)
@@ -2527,6 +2553,7 @@ class OutputLSTM(nn.Module):
     def __init__(self, config):
         super(OutputLSTM, self).__init__()
 
+        self.config = config
         hidden_size = config.hidden_size
         output_size = config.hidden_size
         num_hidden_layers = config.num_hidden_layers
@@ -2546,6 +2573,7 @@ class OutputGRU(nn.Module):
     def __init__(self, config):
         super(OutputGRU, self).__init__()
 
+        self.config = config
         hidden_size = config.hidden_size
         output_size = config.hidden_size
         num_hidden_layers = config.num_hidden_layers
