@@ -1429,12 +1429,13 @@ class LlamaModel(LlamaPreTrainedModel):
                 # Detect where the new token is located
                 where_new_token = where_new_tokens_dict[token_id]
                 # Replace the new token in input_ids_tmp
-                input_ids_tmp = torch.where(where_new_token, torch.tensor([0 for _ in range(6)]).to(input_ids), input_ids_tmp)
+                input_ids_tmp = torch.where(where_new_token, torch.tensor([0 for _ in range(6)]).to(input_ids), input_ids_tmp)   
+
         onsets = self.onset_embedding(input_ids_tmp[..., 0])
         durs = self.dur_embedding(input_ids_tmp[..., 1])
         octaves = self.octave_embedding(input_ids_tmp[..., 2]) 
         pitch_classes = self.pitch_embedding(input_ids_tmp[..., 3])
-        instruments = self.instrument_embedding(input_ids_tmp[..., 4]) 
+        instruments = self.instrument_embedding(input_ids_tmp[..., 4])         
         velocities = self.velocity_embedding(input_ids_tmp[..., 5])
         out_fme = torch.concat([onsets, durs, octaves, pitch_classes, instruments, velocities], dim=-1) #batch, len, dim*6
         
@@ -1961,9 +1962,15 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
         self.model = LlamaModel(config)
         self.sos_token = config.sos_token
         self.eos_token = config.eos_token
-        self.soc_token = -4 
-        self.eoc_token = -5
+        self.soc_token = config.soc_token
+        self.eoc_token = config.eoc_token
+        self.socon_token = config.socon_token
+        self.eocon_token = config.eocon_token
+        self.contour_up_token = config.contour_up
+        self.contour_flat_token = config.contour_flat
+        self.contour_down_token = config.contour_down
         self.model.add_supplementary_embedding(num_tokens = len(config.metadata_tokens), embedding_name = "supplementary_embedding_metadata", hidden_size = config.hidden_size) #commu_specific, add soc, eoc and metadata tokens
+        
         self.if_add_metadata_in_decoder = config.if_add_metadata_in_decoder
         self.if_add_chord_in_decoder = config.if_add_chord_in_decoder
         self.chord_idx2symbol = {v: k for k, v in config.chord_dict.items()}
@@ -1981,6 +1988,9 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
         self.summary_projection = nn.Linear(config.hidden_size, config.decoder["hidden_size"], bias=False) 
         #TODO: add projection layer to shrink the size! nn.Embedding(config.decoder.hidden_size, config.decode_vocab_size)
         self.lm_head = nn.Linear(config.decoder["hidden_size"], config.decode_vocab_size, bias=False) 
+        
+        
+        self.gru_contour_condition_layer = nn.Linear(1*config.hidden_size, decoder_config.hidden_size, bias=False) 
         if self.if_add_metadata_in_decoder:
             self.gru_condition_layer = nn.Linear(11*config.hidden_size, decoder_config.hidden_size, bias=False) 
         if self.if_add_chord_in_decoder:
@@ -2169,107 +2179,164 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
         generation_logits = None
         generation_hidden_state = None
         additional_token_map = {token_id: i for i, token_id in enumerate(self.config.metadata_tokens)}
-        if labels is not None: #if label exists: during training/evaluation --> teacher forcing, return loss;
-            shift_logits_x = logits_shrinked[..., :-1, :].contiguous() #batch, len_x-1, dim
+        
+        
+        if labels is not None:  # if label exists: during training/evaluation --> teacher forcing, return loss;
+            shift_logits_x = logits_shrinked[..., :-1, :].contiguous()  # batch, len_x-1, dim
             shift_labels_x = labels[..., 1:, :].contiguous().to(logits_shrinked.device)
 
-            #gather logits between each sos and eos token 
             batch_size, seq_len, _ = input_ids.shape
-            
+
             logits_list = []
             labels_list = []
             metadata_condition_list = []
             bar_beat_chord_condition_list = []
-            for batch_idx in range(batch_size):
-                # Find the indices of the `sos` and `eos` tokens in the current sequence
-                seq_indices_sos = (input_ids[batch_idx, :, 0] == self.sos_token).nonzero(as_tuple=True)[0].item()
-                seq_indices_eos = (input_ids[batch_idx, :,0] == self.eos_token).nonzero(as_tuple=True)[0].item()
-                
-                # Gather logits between `sos` and `eos` tokens (exclusive of `sos` and `eos` themselves)
-                logits_between_sos_eos = shift_logits_x[batch_idx, seq_indices_sos : seq_indices_eos]
-                labels_between_sos_eos = shift_labels_x[batch_idx, seq_indices_sos : seq_indices_eos]
-                if self.if_add_metadata_in_decoder:
-                    metadata_condition_embedded_single = self.model.supplementary_embedding_metadata(torch.tensor([additional_token_map[token.item()] for token in metadata_condition[batch_idx]]).to(input_ids)).reshape(-1).unsqueeze(0).expand(seq_indices_eos - seq_indices_sos, -1).to(shift_logits_x) #11, dim --> 11*dim --> (1, 11*dim), (len, 11*dim)
-                    metadata_condition_shrinked = self.gru_condition_layer(metadata_condition_embedded_single).unsqueeze(1) #(len, 11*dim) --> (len, dim) --> len, 1, dim
-                    metadata_condition_list.append(metadata_condition_shrinked)
-                if self.if_add_chord_in_decoder: 
-                    bar_OH = F.one_hot(bar_beat_chord_condition[batch_idx, : seq_indices_eos - seq_indices_sos, 0].long(), num_classes=self.bar_classes).to(input_ids) #(len, bar_classes)
-                    beat_OH = F.one_hot(bar_beat_chord_condition[batch_idx, : seq_indices_eos - seq_indices_sos, 1].long(), num_classes=self.beat_classes).to(input_ids) #(len, beat_classes)
-                    #FME/WE:
-                    chord_condition = []
-                    for chord in [self.chord_idx2symbol[chord_idx.item()] for chord_idx in bar_beat_chord_condition[batch_idx, : seq_indices_eos - seq_indices_sos, 2]]:
-                        if chord!="s":
-                            embedded_pitches = self.model.pitch_embedding(torch.tensor(chord_to_midi(chord)).unsqueeze(0).to(input_ids)) # (1, num_pitches, dim)
-                            chord_condition.append(embedded_pitches.sum(dim = 1)) # (1, dim)
-                        else: 
-                            chord_condition.append(self.chord_placeholder_embedding(torch.tensor([0]).to(input_ids))) # (1, dim)
-                    chord_condition_cat = torch.cat(chord_condition, dim = 0) # (len, dim)
-                    bar_beat_chord_condition_cat = torch.cat([bar_OH, beat_OH, chord_condition_cat], dim = -1)
-                    bar_beat_chord_condition_cat_linear = self.chord_condition_layer(bar_beat_chord_condition_cat).unsqueeze(1)
+            contour_token_mask_list = []
+            contour_list = []
 
+            for batch_idx in range(batch_size):
+                seq_indices_sos = (input_ids[batch_idx, :, 0] == self.sos_token).nonzero(as_tuple=True)[0].item()
+                seq_indices_eos = (input_ids[batch_idx, :, 0] == self.eos_token).nonzero(as_tuple=True)[0].item()
+
+                logits_between_sos_eos = shift_logits_x[batch_idx, seq_indices_sos:seq_indices_eos]
+                labels_between_sos_eos = shift_labels_x[batch_idx, seq_indices_sos:seq_indices_eos]
+                input_ids_subseq = input_ids[batch_idx, seq_indices_sos:seq_indices_eos, 0]
+
+                # compute contour token mask (socon/eocon/etc.)
+                mask = (input_ids_subseq == self.socon_token) | (input_ids_subseq == self.eocon_token) | \
+                    (input_ids_subseq == self.contour_up_token) | (input_ids_subseq == self.contour_down_token) | \
+                    (input_ids_subseq == self.contour_flat_token)
+                contour_token_mask_list.append(mask)
+
+                if self.if_add_metadata_in_decoder:
+                    metadata_ids = torch.tensor([additional_token_map[token.item()] for token in metadata_condition[batch_idx]]).to(input_ids)
+                    metadata_condition_embedded_single = self.model.supplementary_embedding_metadata(metadata_ids).reshape(-1).unsqueeze(0).expand(seq_indices_eos - seq_indices_sos, -1).to(shift_logits_x)
+                    metadata_condition_shrinked = self.gru_condition_layer(metadata_condition_embedded_single).unsqueeze(1)
+                    metadata_condition_list.append(metadata_condition_shrinked)
+
+                # Extract contour token IDs and map to embedding indices
+                contour_ids = input_ids_subseq[mask]
+                contour_ids_mapped = torch.tensor([additional_token_map[token.item()] for token in contour_ids]).to(input_ids.device)
+                # Use embedding + GRU on each token individually
+                single_embeddings = self.model.supplementary_embedding_metadata(contour_ids_mapped)  # (num_contour, emb_dim)
+                contour_shrinked_single = []
+                for i in range(single_embeddings.shape[0]):
+                    # (1, emb_dim) -> (1, 1, proj_dim)
+                    token_embed = single_embeddings[i].unsqueeze(0)  # (1, emb_dim)
+                    token_shrinked = self.gru_contour_condition_layer(token_embed).unsqueeze(1)  # (1, 1, dim)
+                    contour_shrinked_single.append(token_shrinked)
+                # Reconstruct per-step tensor by padding zeros in non-contour positions
+                contour_shrinked = torch.cat(contour_shrinked_single, dim=0)  # (num_contour, 1, dim)
+                contour_list.append(contour_shrinked)
+                            
+                
+                if self.if_add_chord_in_decoder:
+                    bar_OH = F.one_hot(bar_beat_chord_condition[batch_idx, :seq_indices_eos - seq_indices_sos, 0].long(), num_classes=self.bar_classes).to(input_ids)
+                    beat_OH = F.one_hot(bar_beat_chord_condition[batch_idx, :seq_indices_eos - seq_indices_sos, 1].long(), num_classes=self.beat_classes).to(input_ids)
+                    chord_condition = []
+                    for chord in [self.chord_idx2symbol[chord_idx.item()] for chord_idx in bar_beat_chord_condition[batch_idx, :seq_indices_eos - seq_indices_sos, 2]]:
+                        if chord != "s":
+                            embedded_pitches = self.model.pitch_embedding(torch.tensor(chord_to_midi(chord)).unsqueeze(0).to(input_ids))
+                            chord_condition.append(embedded_pitches.sum(dim=1))
+                        else:
+                            chord_condition.append(self.chord_placeholder_embedding(torch.tensor([0]).to(input_ids)))
+                    chord_condition_cat = torch.cat(chord_condition, dim=0)
+                    bar_beat_chord_condition_cat = torch.cat([bar_OH, beat_OH, chord_condition_cat], dim=-1)
+                    bar_beat_chord_condition_cat_linear = self.chord_condition_layer(bar_beat_chord_condition_cat).unsqueeze(1)
                     bar_beat_chord_condition_list.append(bar_beat_chord_condition_cat_linear)
 
                 logits_list.append(logits_between_sos_eos)
                 labels_list.append(labels_between_sos_eos)
-                
-            shift_logits_x = torch.cat(logits_list, dim = 0) #len_concat, dim
-            shift_labels_x = torch.cat(labels_list, dim = 0) #len_concat, onset_vocab_size + dur_size + .. + vel_size
+
+            shift_logits_x = torch.cat(logits_list, dim=0)
+            shift_labels_x = torch.cat(labels_list, dim=0)
+
             if self.if_add_metadata_in_decoder:
-                metadata_condition_embedded = torch.cat(metadata_condition_list, dim = 0) #(len_concat, 1, dim)
+                metadata_condition_embedded = torch.cat(metadata_condition_list, dim=0)
             if self.if_add_chord_in_decoder:
-                bar_beat_chord_condition_embedded = torch.cat(bar_beat_chord_condition_list, dim = 0) #(len_concat, 1, dim)
-            if self.decoder_attn_implementation == "output": #DANGEROURS: here shift labels does not contain SOS_decoding token 
-                # 1. get the "SOS" token for each decoding step
-                music_summary = shift_logits_x.view(-1, shift_logits_x.shape[-1]).unsqueeze(1) #batch*(len_x-1), 1, dim 
-                
-                #2. shift the labels and concat with intermediate "SOS" tokens: music summary
-                shift_labels_x = shift_labels_x.view(-1, shift_labels_x.shape[-1]) #batch*(len_x-1), onset_vocab_size + dur_size + .. + vel_size / batch*(len_x-1), len_y
-                
+                bar_beat_chord_condition_embedded = torch.cat(bar_beat_chord_condition_list, dim=0)
+            contour_embedded = torch.cat(contour_list, dim=0)
 
-                shift_labels_x_y_encoded = self.decoder_embedding(shift_labels_x[:, :-1]) #batch*(len_x-1), len_y-1, dim
-                decoder_input = torch.concat([music_summary, shift_labels_x_y_encoded], dim = 1) #batch*(len_x-1), len_y, dim
+            if self.decoder_attn_implementation == "output":
+                music_summary = shift_logits_x.view(-1, shift_logits_x.shape[-1]).unsqueeze(1)
+                shift_labels_x = shift_labels_x.view(-1, shift_labels_x.shape[-1])
+                token_inputs = shift_labels_x[:, :-1]
+                flat_mask = torch.cat(contour_token_mask_list, dim=0).unsqueeze(-1).expand(-1, token_inputs.shape[1])
+                shift_labels_x_y_encoded = token_inputs.new_zeros(token_inputs.shape[0], token_inputs.shape[1], self.decoder.config.hidden_size)
+
+                note_mask = ~flat_mask
+                if note_mask.any():
+                    shift_labels_x_y_encoded[note_mask] = self.decoder_embedding(token_inputs[note_mask])
+                if flat_mask.any():
+                    contour_ids = token_inputs[flat_mask]
+                    mapped_ids = torch.tensor([additional_token_map[t.item()] for t in contour_ids], device=token_inputs.device).long()
+                    print(f"contour_ids_mapped dtype: {contour_ids_mapped.dtype}")  # 应该是 torch.int64
+                    contour_embeds = self.model.supplementary_embedding_metadata(mapped_ids)  # (num_contour, emb_dim)
+                    contour_single_embeds = []
+                    for i in range(contour_embeds.shape[0]):
+                        # (1, emb_dim) -> (1, 1, proj_dim)
+                        contour_temp = contour_embeds[i].unsqueeze(0)  # (1, emb_dim)
+                        contour_temp = self.gru_contour_condition_layer(contour_temp).unsqueeze(1)  # (1, 1, dim)
+                        contour_single_embeds.append(contour_temp)
+
+                    # Reconstruct per-step tensor by padding zeros in non-contour positions
+                    contour_embeds = torch.cat(contour_single_embeds, dim=0)  # (num_contour, 1, dim)                    
+                    shift_labels_x_y_encoded[flat_mask] = contour_embeds
+                    
 
 
+                decoder_input = torch.cat([music_summary, shift_labels_x_y_encoded], dim=1)
                 generation_logits = self.decoder(
-                    input_ids=None,
-                    attention_mask=None, 
-                    position_ids=None,
-                    past_key_values=None,
-                    inputs_embeds=decoder_input,
-                    use_cache=False,
-                    output_attentions=False,
-                    output_hidden_states=False,
-                    return_dict=False,
-                    cache_position=None)
-            elif self.decoder_attn_implementation == "MLP": #DANGEROURS: here shift labels does not contain SOS_decoding token 
+                    input_ids=None, attention_mask=None, position_ids=None, past_key_values=None,
+                    inputs_embeds=decoder_input, use_cache=False, output_attentions=False,
+                    output_hidden_states=False, return_dict=False, cache_position=None
+                )
 
-                music_summary = shift_logits_x.view(-1, shift_logits_x.shape[-1]) #batch*(len_x-1), dim 
-                generation_logits = self.decoder(music_summary) #batch*(len_x-1), len_y*dim 
-                generation_logits = generation_logits.view(music_summary.shape[0], shift_labels_x.shape[-1], -1) #batch*(len_x-1), len_y, decode_vocab_size
+            elif self.decoder_attn_implementation == "MLP":
+                music_summary = shift_logits_x.view(-1, shift_logits_x.shape[-1])
+                generation_logits = self.decoder(music_summary)
+                generation_logits = generation_logits.view(music_summary.shape[0], shift_labels_x.shape[-1], -1)
                 generation_logits = [generation_logits]
-            
-            elif self.decoder_attn_implementation == "GRU": #DANGEROURS: here shift labels contain SOS_decoding token / does not need EOS?
-                shift_logits_x_flattened = shift_logits_x.view(-1, shift_logits_x.shape[-1]) #batch*(len_x-1), dim 
-                shift_labels_x_flattened = shift_labels_x.view(-1, shift_labels_x.shape[-1]) #batch*(len_x-1), onset_vocab_size + dur_size + .. + vel_size / batch*(len_x-1), len_y
-                
-                shift_labels_x_y = shift_labels_x_flattened[:, 1:].contiguous() #batch*(len_x-1), len_y-1(1:)
-                
-                shift_labels_x_y_encoded = self.decoder_embedding(shift_labels_x_flattened[:, :-1]) #batch*(len_x-1), len_y-1(:-1), dim
+
+            elif self.decoder_attn_implementation == "GRU":
+                shift_logits_x_flattened = shift_logits_x.view(-1, shift_logits_x.shape[-1])
+                shift_labels_x_flattened = shift_labels_x.view(-1, shift_labels_x.shape[-1])
+                shift_labels_x_y = shift_labels_x_flattened[:, 1:].contiguous()
+
+                full_contour_mask = torch.cat(contour_token_mask_list, dim=0)
+                is_contour = full_contour_mask[:, None].expand(-1, shift_labels_x_y.shape[1])
+
+                # contour_input = shift_labels_x_y[is_contour].view(-1, shift_labels_x_y.shape[1])
+                note_input = shift_labels_x_y[~is_contour].view(-1, shift_labels_x_y.shape[1])
+
+                note_embedded = self.decoder_embedding(note_input)
+                shift_labels_x_y_encoded = torch.zeros_like(note_embedded).new_zeros(shift_labels_x_y.shape[0], shift_labels_x_y.shape[1], note_embedded.shape[-1])
+                shift_labels_x_y_encoded[full_contour_mask] = contour_embedded
+                shift_labels_x_y_encoded[~full_contour_mask] = note_embedded
 
                 if self.if_add_metadata_in_decoder:
-                    shift_labels_x_y_encoded =  shift_labels_x_y_encoded + metadata_condition_embedded
+                    shift_labels_x_y_encoded += metadata_condition_embedded
                 if self.if_add_chord_in_decoder:
-                    shift_labels_x_y_encoded =  shift_labels_x_y_encoded + bar_beat_chord_condition_embedded
-                generation_logits, generation_hidden_state = self.decoder(shift_labels_x_y_encoded, shift_logits_x_flattened.unsqueeze(0).expand(self.decoder.num_hidden_layers, -1, -1)) #batch*(len_x-1), len_y-1, decode_vocab_size
+                    shift_labels_x_y_encoded += bar_beat_chord_condition_embedded
 
+                
+                generation_logits, generation_hidden_state = self.decoder(
+                    shift_labels_x_y_encoded,
+                    shift_logits_x_flattened.unsqueeze(0).expand(self.decoder.num_hidden_layers, -1, -1).contiguous()
+                )
                 generation_logits = [generation_logits]
 
-            elif self.decoder_attn_implementation == "LSTM": #DANGEROURS: here shift labels contain SOS_decoding token 
+            elif self.decoder_attn_implementation == "LSTM":
                 print("not yet implemented")
-
-            generation_logits= self.lm_head(generation_logits[0]).float().view(-1, self.config.decode_vocab_size)
+            
+            generation_logits = self.lm_head(generation_logits[0]).float().view(-1, self.config.decode_vocab_size)
             shift_labels_x_y = shift_labels_x_y.view(-1)
+            full_contour_mask = torch.cat(contour_token_mask_list, dim=0).repeat_interleave(shift_labels_x.shape[-1]-1)
+            shift_labels_x_y[full_contour_mask] = -100                     # (3612,3096)
             loss = self.loss_func(generation_logits, shift_labels_x_y)
+            # print(f"loss: {loss}")
+        
+        # zhangqiaoxi todo: add contour condition for inference()
         elif decoded_language_tokens is not None and decoded_hidden_state is not None: #else during inference (decoding)--> inference autoregressively, return generated tokens
             if self.decoder_attn_implementation == "GRU":    
                 decoded_language_tokens_encoded = self.decoder_embedding(decoded_language_tokens)##batch*len_x, len_y--> batch*lenx, len_y, dim

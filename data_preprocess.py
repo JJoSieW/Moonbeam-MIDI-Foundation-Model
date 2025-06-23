@@ -290,8 +290,8 @@ def process_single_file(args):
 
 def find_midi_files_from_file_commu(dataset_name, split_file, dataset_folder, output_folder):
     if dataset_name == "commu_con_gen":
-        output_path = f"{dataset_folder}/commu_midi_chords"
-        output_path_bar_beat_chord = f"{dataset_folder}/commu_midi_bar_beat_chord"
+        output_path = f"{output_folder}/commu_midi_chords"
+        output_path_bar_beat_chord = f"{output_folder}/commu_midi_bar_beat_chord"
         os.makedirs(output_path+"/train", exist_ok=True)
         os.makedirs(output_path+"/val", exist_ok=True)
         os.makedirs(output_path_bar_beat_chord+"/train", exist_ok=True)
@@ -316,7 +316,9 @@ def find_midi_files_from_file_commu(dataset_name, split_file, dataset_folder, ou
 
         tokens_dict.pop("Unnamed: 0", None) # Remove the 'Unnamed: 0' key if it exists
         # Create an indexed dictionary
-        indexed_tokens_dict = {"soc_token_compound": -4, "eoc_token_compound": -5}
+        indexed_tokens_dict = {"soc_token_compound": -4, "eoc_token_compound": -5, 
+                               "socon_token_compound": -400, "eocon_token_compound": -401,
+                               "contour_up_compound": -402, "contour_flat_compound": -403, "contour_down_compound": -404}
 
         index = -6
 
@@ -497,7 +499,8 @@ if __name__ == '__main__':
     parser.add_argument('--output_folder', type=str, help='Path to the folder where processed files will be saved.')
     parser.add_argument('--model_config', type=str, help='Model configuration file that decides the vocab size')
     parser.add_argument('--train_test_split_file', type=lambda x: None if x == "None" else str(x), help='Path to the split file.')
-    parser.add_argument('--train_ratio', type=float, help='Training/Total')
+    parser.add_argument('--train_ratio', type=lambda x: None if x == "None" else float(x), help='Training/Total')
+    # parser.add_argument('--train_ratio', type=float, help='Training/Total')
     parser.add_argument('--ts_threshold', type=lambda x: None if x == "None" else int(x), help='If Timeshift exceeds this value, chunk the file')
 
     args = parser.parse_args()
@@ -529,6 +532,7 @@ if __name__ == '__main__':
         pitch_class_vocab_size = data.get("pitch_class_vocab_size", None)
         instrument_vocab_size = data.get("instrument_vocab_size", None)
         velocity_vocab_size = data.get("velocity_vocab_size", None)
+        interval_class_vocab_size = data.get("interval_class_vocab_size", None)
         assert onset_vocab_size and dur_vocab_size
     print(f"processing using {num_cores} cpus. tokenizer config: max timeshift allowed: {onset_vocab_size-3}, max duration allowed: {dur_vocab_size-3}")
     tokenizer = MusicTokenizer(timeshift_vocab_size = onset_vocab_size, dur_vocab_size = dur_vocab_size, octave_vocab_size = octave_vocab_size, pitch_class_vocab_size = pitch_class_vocab_size, instrument_vocab_size = instrument_vocab_size, velocity_vocab_size = velocity_vocab_size)  

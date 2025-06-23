@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 @dataclass
 class train_config:
-    model_name: str="PATH/to/Model"
+    model_name: str="moonbeam_contour_v1"
     tokenizer_name: str=None
     enable_fsdp: bool=False
     enable_ddp: bool=False
@@ -30,16 +30,16 @@ class train_config:
     use_fp16: bool=False
     mixed_precision: bool=True
     val_batch_size: int=1
-    dataset = "samsum_dataset"
+    dataset = "commu_con_gen_dataset"
     peft_method: str = "lora" # None, llama_adapter (Caution: llama_adapter is currently not supported with FSDP)
     use_peft: bool=False
-    output_dir: str = "PATH/to/save/PEFT/model"
+    output_dir: str = "checkpoints/contour_v1/peft"
     freeze_layers: bool = False
     num_freeze_layers: int = 1
     quantization: bool = False
     one_gpu: bool = False
     save_model: bool = True
-    trained_checkpoint_path: str = "PATH/to/saved/trained/model"
+    trained_checkpoint_path: str = "checkpoints/moonbeam_839M.pt"
     dist_checkpoint_root_folder: str="PATH/to/save/FSDP/model" # will be used if using FSDP
     dist_checkpoint_folder: str="fine-tuned" # will be used if using FSDP
     save_optimizer: bool=False # will be used if using FSDP
@@ -49,4 +49,4 @@ class train_config:
     flop_counter: bool = False # Enable flop counter to measure model throughput, can not be used with pytorch profiler at the same time.
     flop_counter_start: int = 3 # The step to start profiling, default is 3, which means after 3 steps of warmup stage, the profiler will start to count flops.
     use_profiler: bool = False # Enable pytorch profiler, can not be used with flop counter at the same time.
-    profiler_dir: str = "PATH/to/save/profiler/results" # will be used if using profiler
+    profiler_dir: str = "results/contour_v1/profiler" # will be used if using profiler

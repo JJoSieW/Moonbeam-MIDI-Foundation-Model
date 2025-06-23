@@ -25,10 +25,10 @@ def octave_pitch_class_to_pitch(octave, pitch_class):
 
 
 class MusicTokenizer():
-    def __init__(self, timeshift_vocab_size = 21, dur_vocab_size = 1001, octave_vocab_size = 9, \
+    def __init__(self, timeshift_vocab_size = 2100, dur_vocab_size = 1001, octave_vocab_size = 9, \
                  pitch_class_vocab_size = 12, instrument_vocab_size = 128, velocity_vocab_size = 129, \
                  contour_vocab_size = 3, sos_token = -1, eos_token = -2, pad_token = -3, \
-                 socon_token=-4, eocon_token=-5):
+                 socon_token=-400, eocon_token=-401, contour_up=-402, contour_flat=-403, contour_down=-404):
         self.timeshift_vocab_size = timeshift_vocab_size
         self.dur_vocab_size = dur_vocab_size
         self.octave_vocab_size = octave_vocab_size
@@ -46,11 +46,17 @@ class MusicTokenizer():
         self.eos_token_compound = [self.eos_token for _ in range(6)]
         self.pad_token_compound = [self.pad_token for _ in range(6)] 
         
-            # for contour tokens
+        # contour tokens
         self.socon_token = socon_token
         self.eocon_token = eocon_token
+        self.contour_up = contour_up
+        self.contour_flat = contour_flat
+        self.contour_down = contour_down
         self.socon_token_compound = [self.socon_token for _ in range(6)]
         self.eocon_token_compound = [self.eocon_token for _ in range(6)]
+        self.contour_up_compound = [self.contour_up for _ in range(6)]
+        self.contour_flat_compound = [self.contour_flat for _ in range(6)]
+        self.contour_down_compound = [self.contour_down for _ in range(6)]
 
         #define labels (language tokens)
         self.sos_timeshift, self.eos_timeshift = self.timeshift_vocab_size-2, self.timeshift_vocab_size-1 #TODO think whether this is correct
@@ -134,6 +140,7 @@ class MusicTokenizer():
         #4. encode it to labels 
         labels = [self.convert_to_language_tokens(x) for x in output]
         return labels
+    
     def encode_series_con_gen_emotion(self, raw_token_series, if_add_sos, if_add_eos, emotion_token_4Q = None):
         # Emo_4Q (total 4 types) + SOS + music_seq + EOS 
         out = [self.encode_single(x) for x in raw_token_series]
@@ -181,52 +188,52 @@ class MusicTokenizer():
         # meta_data_tokens,<SOC> chords, <EOC>, <SOS> music_seq, <EOS>   
         # music_seq: <SOCON> contour tokens <EOCON>
         if not if_only_keep_condition_tokens:
-            print("=== 开始处理音乐序列 ===")
+            # print("=== 开始处理音乐序列 ===")
             out = [self.encode_single(x) for x in raw_token_series]
-            print(f"原始token数量: {len(out)}")
+            # print(f"原始token数量: {len(out)}")
             
             # extract contour
-            print("=== 开始提取轮廓 ===")
+            # print("=== 开始提取轮廓 ===")
             raw_melody_sequence = [[onset, duration, 12 * octave + pitch_class, instrument] 
                                   for onset, duration, octave, pitch_class, instrument, velocity in out]
-            print(f"melody_sequence长度: {len(raw_melody_sequence)}")
-            print(f"melody_sequence前3个: {raw_melody_sequence[:3]}")
+            # print(f"melody_sequence长度: {len(raw_melody_sequence)}")
+            # print(f"melody_sequence前3个: {raw_melody_sequence[:3]}")
             
             extractor = MelodyContourExtractor(raw_melody_sequence)
             contour = extractor.get_final_contour()
-            print(f"提取的轮廓数量: {len(contour)}")
-            print(f"轮廓内容: {contour}")
+            # print(f"提取的轮廓数量: {len(contour)}")
+            # print(f"轮廓内容: {contour}")
             
             # insert contour tokens
-            print("=== 开始插入轮廓token ===")
+            # print("=== 开始插入轮廓token ===")
             result = out.copy()
 
             for contour_item in contour:
                 target_value = contour_item[0]  
-                print(f"寻找目标值: {target_value}")
+                # print(f"寻找目标值: {target_value}")
                 # find the first matching position in result
                 for i, out_item in enumerate(result):
                     if out_item[0] == target_value:
-                        print(f"找到匹配位置 {i}, 插入轮廓token")
+                        # print(f"找到匹配位置 {i}, 插入轮廓token")
                         result.insert(i, self.socon_token_compound)
                         
                         if contour_item[1] > 0:                       
-                            result.insert(i + 1, [1,0,0,0,0,0])  
+                            result.insert(i + 1, self.contour_up_compound)  
                         elif contour_item[1] == 0:
-                            result.insert(i + 1, [0,1,0,0,0,0])
+                            result.insert(i + 1, self.contour_flat_compound)
                         elif contour_item[1] < 0:
-                            result.insert(i + 1, [0,0,1,0,0,0])
-                
+                            result.insert(i + 1, self.contour_down_compound)
+
                         result.insert(i + 2, self.eocon_token_compound)
                         break
             
             out = result
             
             out = [self.sos_token_compound] + out + [self.eos_token_compound]
-            print("=== 最终结果 ===")
-            print(out)
-            print("=== 程序结束 ===")
-            exit()
+            # print("=== 最终结果 ===")
+            # print(out)
+            # print("=== 程序结束 ===")
+            # exit()
         else:
             out = []
         
@@ -256,29 +263,48 @@ class MusicTokenizer():
             return metadata_tokens + out_chord + out
 
     def encode_series_labels_con_gen_commu(self, encoded_tokens):
-        # meta_data_tokens,<SOC> chords, <EOC>, <SOS> music_seq, <EOS>   
-        encoded_tokens = torch.tensor(encoded_tokens) #temporarily convert to tensor for easier slicing (len, 6)
-        #first retrieve only the music_seq, retrieve the segment between [self.sos_token_compound] and [self.sos_token_compound]
-        # Ensure the comparison results in a tensor
+        encoded_tokens = torch.tensor(encoded_tokens)  # shape (L, 6)
+
+        # 1. Find <sos> and <eos>
         sos_idx = (encoded_tokens == torch.tensor(self.sos_token_compound)).all(dim=1).nonzero(as_tuple=True)[0]
         eos_idx = (encoded_tokens == torch.tensor(self.eos_token_compound)).all(dim=1).nonzero(as_tuple=True)[0]
-        encoded_tokens = encoded_tokens[sos_idx[0]+1:eos_idx[0]]
 
-        #1. Convert onsets to delta onsets
-        timeshift_labels_raw =  torch.diff(encoded_tokens[:, 0], prepend=torch.tensor([0]))
-        #2. Concat the raw value
+        music_seq = encoded_tokens[sos_idx[0] + 1 : eos_idx[0]]
 
-        output = torch.cat([torch.zeros(encoded_tokens.shape[0]).unsqueeze(-1) , timeshift_labels_raw.unsqueeze(-1), encoded_tokens[:, 1:]], dim = -1).tolist()
+        # 2. contour mask
+        contour_mask = torch.zeros(len(music_seq), dtype=torch.bool)
+        for i, token in enumerate(music_seq):
+            if torch.equal(token, torch.tensor(self.socon_token_compound)) or \
+            torch.equal(token, torch.tensor(self.eocon_token_compound)) or \
+            token.tolist() in [self.contour_up_compound, self.contour_flat_compound, self.contour_down_compound]:
+                contour_mask[i] = True
 
-        #3. Add sos and eos label 
-        output = [self.sos_label] + output + [self.eos_label]
+        # 3. select only non-contour tokens for time diff
+        non_contour_idx = (~contour_mask).nonzero(as_tuple=True)[0]
+        valid_tokens = music_seq[non_contour_idx]
 
-        output = [self.sos_label for _ in range(sos_idx[0])]  + output #since we are not really predicting the chord and metadata tokens, we can use dummy labels (self.sos_label) for these tokens
+        # 4. compute delta onset
+        onsets = valid_tokens[:, 0]
+        delta_onsets = torch.diff(onsets, prepend=torch.tensor([0]))
 
-        #4. encode it to labels 
+        # 5. reconstruct label_tensor with dummy for contour
+        label_tensor = torch.zeros((len(music_seq), 7))  # full dummy
+        valid_labels = torch.cat([
+            torch.zeros(len(valid_tokens)).unsqueeze(-1),  # dummy
+            delta_onsets.unsqueeze(-1),
+            valid_tokens[:, 1:]
+        ], dim=-1)
+
+        label_tensor[non_contour_idx] = valid_labels
+
+        # 6. assemble final output
+        output = [self.sos_label for _ in range(sos_idx[0])]
+        output += [self.sos_label if contour_mask[i] else label_tensor[i].tolist() for i in range(len(music_seq))]
+        output.append(self.eos_label)
+
         labels = [self.convert_to_language_tokens(x) for x in output]
         return labels
-
+    
 
     def convert_to_language_tokens(self, x):
         """
