@@ -15,6 +15,7 @@ import pandas as pd
 import os
 
 import pretty_midi
+import matplotlib.pyplot as plt
 from llama_recipes.datasets.extract_contour import MelodyContourExtractor
 
 def pitch_to_octave_pitch_class(pitch):
@@ -198,11 +199,18 @@ class MusicTokenizer():
                                   for onset, duration, octave, pitch_class, instrument, velocity in out]
             # print(f"melody_sequence长度: {len(raw_melody_sequence)}")
             # print(f"melody_sequence前3个: {raw_melody_sequence[:3]}")
+
             
             extractor = MelodyContourExtractor(raw_melody_sequence)
+            
             contour = extractor.get_final_contour()
             # print(f"提取的轮廓数量: {len(contour)}")
             # print(f"轮廓内容: {contour}")
+            
+            # extractor.plot_all()  # 如需可视化
+            # plt.savefig('test_plot.png', dpi=300, bbox_inches='tight')
+            # plt.close()  # 关闭图形释放内存
+            # exit()
             
             # insert contour tokens
             # print("=== 开始插入轮廓token ===")

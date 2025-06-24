@@ -300,13 +300,17 @@ def find_midi_files_from_file_commu(dataset_name, split_file, dataset_folder, ou
 
         df["inst"] = df["inst"].apply(lambda x: x.split("-")[0])
 
+        # remove midi files with timpani, as it is not a melodic instrument
+        df = df[df["inst"] != "timpani"]
+        
         #step1: construct tokens_dict and save it to local json file
         tokens_dict = {}
 
         for column in df.columns:
             # Skip 'split' and 'id' columns
-            if column in ['split_data', 'id', "chord_progressions"]:
+            if column in ['split_data', 'id', "chord_progressions", 'pitch_range','num_measures','bpm', 'genre', 'sample_rhythm', 'time_signature', 'min_velocity', 'max_velocity'] :
                 continue
+            
             
             # Extract unique values for the column
             unique_values = df[column].unique()

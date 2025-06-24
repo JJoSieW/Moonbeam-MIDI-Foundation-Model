@@ -12,7 +12,7 @@
 python data_preprocess.py \
 --dataset_name commu_con_gen \
 --dataset_folder dataset/commu/commu_midi \
---output_folder dataset/preprocessed/commu \
+--output_folder dataset/preprocessed/commu_selected_metadata \
 --model_config src/llama_recipes/configs/model_config_commu_con_gen.json \
 --train_test_split_file dataset/commu/commu_meta.csv \
 --train_ratio None \
