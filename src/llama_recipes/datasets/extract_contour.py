@@ -2,6 +2,7 @@ import pretty_midi
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from rdp import rdp
+import numpy as np
 
 
 # TIME_RESOLUTION = 100  # 和tokenizer保持一致
@@ -103,6 +104,7 @@ class MelodyContourExtractor:
     #     return melody_instr.notes
 
     def smooth_melody(self):
+        # TODO: change extracting procedure: 1. use rdp() to smooth the melody, 2. use the smoothed melody to extract the contour
         # pitches = [n.abs_pitch for n in self.melody_notes]
         smoothed = []
         pitches = self.pitches
@@ -111,11 +113,44 @@ class MelodyContourExtractor:
             start = max(0, i - half)
             end = min(len(pitches), i + half + 1)
             smoothed.append(sum(pitches[start:end]) / (end - start))
+        
+        # smoothed = self.melody_notes
+        
+        # # for start_time, interval, dur in smoothed:
+        # #     merged.append((start_time, interval))
+        
+        # end_time = self.melody_notes[-1].onset + self.melody_notes[-1].duration
+        # sorted_pitch = np.array([], dtype=np.int32)
+        # while len(smoothed) > end_time/100:
+        #     if sorted_pitch.size == 0:
+        #         sorted_pitch = np.array(sorted(set(abs(pitch) for _, _, pitch in smoothed)))
+        #         if 0 in sorted_pitch:
+        #             sorted_pitch = sorted_pitch[sorted_pitch != 0]
+        #         delta_sorted_pitch = sorted_pitch//2
+        #         # sorted_interval = np.array(sorted_interval)
+        #         # delta_sorted_interval = np.array(delta_sorted_interval)
+        #         print('sorted_pitch', sorted_pitch)
+        #         print('begin simplifying ......')
+            
+        #     for i in sorted_pitch:
+        #         if len(smoothed) > end_time/100: 
+        #             # print('sorted_interval', i)
+        #             smoothed = rdp(smoothed, epsilon=i) 
+        #         else:
+        #             break
+            
+        #     if len(smoothed) > end_time/100: 
+        #         sorted_pitch = sorted_pitch + delta_sorted_pitch
+        #         print('sorted_pitch', sorted_pitch)
+        #     print() 
+            
+        
         return smoothed
 
-    def simplify_contour_smoothed(self):
+    def simplify_contour(self):
         notes = self.melody_notes
         pitches = self.pitches
+        # pitches = smoothed_pitches
         if len(notes) < 2:
             return []
         # quarter_duration = 60.0 / self.tempo
@@ -148,46 +183,71 @@ class MelodyContourExtractor:
         if not contour:
             return []
         merged = []
-        for start_time, interval, dur in contour:
-            if merged and abs(interval) <= self.merge_threshold:
-                prev_start_time, prev_iv, prev_dur = merged[-1]
-                merged[-1] = (prev_start_time, prev_iv + interval, prev_dur + dur)
-                
-            else:
-                merged.append((start_time, interval, dur))
-                
-        merged = [(start_time, interval) for start_time, interval, _ in merged]
+        if len(contour[0]) == 3:
+            for start_time, interval, dur in contour:
+                if merged and abs(interval) <= self.merge_threshold:
+                    prev_start_time, prev_iv, prev_dur = merged[-1]
+                    merged[-1] = (prev_start_time, prev_iv + interval, prev_dur + dur)
+                    
+                else:
+                    merged.append((start_time, interval, dur))
+                    
+            merged = [(start_time, interval) for start_time, interval, _ in merged]
+        elif len(contour[0]) == 2:
+            for start_time, interval in contour:
+                if merged and abs(interval) <= self.merge_threshold:
+                    prev_start_time, prev_iv, prev_dur = merged[-1]
+                    merged[-1] = (prev_start_time, prev_iv + interval, prev_dur + dur)
+                    
+                else:
+                    merged.append((start_time, interval))
 
         return merged
 
     def get_final_contour(self):
-        # smoothed = self.smooth_melody()
-        simplified = self.simplify_contour_smoothed()
+        simplified = self.simplify_contour()
         
         # end_time = self.melody_notes[-1].onset + self.melody_notes[-1].duration
         # if ~len(simplified): # <= end_time/100:
-        #     # option 1: merge small intervals
-        merged = self.merge_small_intervals(simplified)
-            
-        #     # # option 2: simple, didnt merge small intervals
-        #     # merged = []
-        #     # for start_time, interval, dur in simplified:
-        #     #     merged.append((start_time, interval))
-        # else:
-        
-        
-        # # option 3: rdp
-        # # span = max(self.pitches) - min(self.pitches)
-        # # epsilon = span * 0.4
-        # # print('span',span)
-        # # print('simplified.interval',[(interval) for _, interval, _ in simplified]
-        # min_interval = min([abs(interval) for _, interval, _ in simplified])
-        # print('min_terval', min_interval)
+        # #     # option 1: merge small intervals
+        #     merged = self.merge_small_intervals(simplified)  
+        # # option 2: simple, didnt merge small intervals
         # merged = []
         # for start_time, interval, dur in simplified:
         #     merged.append((start_time, interval))
-        # merged = rdp(merged, epsilon=min_interval)      
+        # else:
+        #     # option 3: rdp
+        #     span = max(self.pitches) - min(self.pitches)
+        #     epsilon = span * 0.4
+        #     print('span',span)
+        #     print('simplified.interval',[(interval) for _, interval, _ in simplified])
+        
+        merged = []
+        for start_time, interval, dur in simplified:
+            merged.append((start_time, interval))
+        
+        end_time = self.melody_notes[-1].onset + self.melody_notes[-1].duration
+        sorted_interval = np.array([], dtype=np.int32)
+        while len(merged) > end_time/100:
+            if sorted_interval.size == 0:
+                sorted_interval = np.array(sorted(set(abs(interval) for _, interval in merged)))
+                if 0 in sorted_interval:
+                    sorted_interval = sorted_interval[sorted_interval != 0]
+                delta_sorted_interval = sorted_interval//2
+                # print('sorted_interval', sorted_interval)
+                # print('begin simplifying ......')
             
+            for i in sorted_interval:
+                if len(merged) > end_time/100: 
+                    merged = rdp(merged, epsilon=i) 
+                else:
+                    break
+            
+            if len(merged) > end_time/100: 
+                sorted_interval = sorted_interval + delta_sorted_interval
+                # print('sorted_interval', sorted_interval)
+            # print()
+
         return merged
 
     def print_final_contour(self):
@@ -264,9 +324,8 @@ if __name__ == "__main__":
     
     raw_melody_sequences = [raw_melody_sequence1, raw_melody_sequence2, raw_melody_sequence3, raw_melody_sequence4, raw_melody_sequence5, raw_melody_sequence6, raw_melody_sequence7]
     for idx in range(1, len(raw_melody_sequences)+1):
-        print(idx)
-        extractor = MelodyContourExtractor(raw_melody_sequences[idx-1], merge_threshold=0)
+        extractor = MelodyContourExtractor(raw_melody_sequences[idx-1])
         # extractor.print_final_contour()
         extractor.plot_with_duration_axis()
-        plt.savefig(f'./zzz-figs/simple{idx}.png', dpi=300, bbox_inches='tight')
+        plt.savefig(f'./zzz-figs/rdp_new{idx}.png', dpi=300, bbox_inches='tight')
         plt.close()
