@@ -1992,7 +1992,7 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
         
         self.gru_contour_condition_layer = nn.Linear(1*config.hidden_size, decoder_config.hidden_size, bias=False) 
         if self.if_add_metadata_in_decoder:
-            self.gru_condition_layer = nn.Linear(11*config.hidden_size, decoder_config.hidden_size, bias=False) 
+            self.gru_condition_layer = nn.Linear(3*config.hidden_size, decoder_config.hidden_size, bias=False)  #TODO: now, have to manually change input size when token number changes   
         if self.if_add_chord_in_decoder:
             self.chord_condition_layer = nn.Sequential(
                 nn.Linear(config.hidden_size // 6 + self.bar_classes + self.beat_classes, decoder_config.hidden_size//2, bias=False),
@@ -2365,39 +2365,83 @@ class LlamaForCausalLM_Conditional_Generation(LlamaPreTrainedModel):
         # zqx zhangqiaoxi todo: add contour condition for inference()
         elif decoded_language_tokens is not None and decoded_hidden_state is not None: #else during inference (decoding)--> inference autoregressively, return generated tokens
             if self.decoder_attn_implementation == "GRU":    
-                decoded_language_tokens_encoded = self.decoder_embedding(decoded_language_tokens)##batch*len_x, len_y--> batch*lenx, len_y, dim
-                decoder_input = decoded_language_tokens_encoded
+                # Detect contour tokens in decoded_language_tokens
+                contour_mask = (decoded_language_tokens == self.socon_token) | (decoded_language_tokens == self.eocon_token) | \
+                    (decoded_language_tokens == self.contour_up_token) | (decoded_language_tokens == self.contour_down_token) | \
+                    (decoded_language_tokens == self.contour_flat_token)
+                
+                # Flatten the tensors to match training logic
+                decoded_language_tokens_flattened = decoded_language_tokens.view(-1)  # (batch*seq_len,)
+                contour_mask_flattened = contour_mask.view(-1)  # (batch*seq_len,)
+                
+                # Initialize decoder input tensor
+                decoder_input = torch.zeros(decoded_language_tokens_flattened.shape[0], 
+                                          self.decoder.config.hidden_size, 
+                                          device=decoded_language_tokens.device)
+                
+                # Handle note tokens (non-contour tokens)
+                note_mask = ~contour_mask_flattened
+                note_tokens = decoded_language_tokens_flattened[note_mask]
+                note_embedded = self.decoder_embedding(note_tokens)
+                decoder_input[note_mask] = note_embedded
+                
+                # Handle contour tokens
+                if contour_mask_flattened.any():
+                    contour_tokens = decoded_language_tokens_flattened[contour_mask_flattened]
+                    # Map contour tokens to embedding indices
+                    contour_ids_mapped = torch.tensor([additional_token_map[token.item()] for token in contour_tokens], 
+                                                    device=decoded_language_tokens.device, dtype=torch.long)
+                    # Use supplementary embedding for contour tokens
+                    contour_embeddings = self.model.supplementary_embedding_metadata(contour_ids_mapped)
+                    # Apply contour condition layer to each token individually
+                    contour_shrinked_single = []
+                    for i in range(contour_embeddings.shape[0]):
+                        # (1, emb_dim) -> (1, 1, proj_dim)
+                        token_embed = contour_embeddings[i].unsqueeze(0)  # (1, emb_dim)
+                        token_shrinked = self.gru_contour_condition_layer(token_embed).unsqueeze(1)  # (1, 1, dim)
+                        contour_shrinked_single.append(token_shrinked)
+                    # Reconstruct per-step tensor
+                    contour_shrinked = torch.cat(contour_shrinked_single, dim=0)  # (num_contour, 1, dim)
+                    # Expand to match the expected dimension like in training
+                    contour_expanded = contour_shrinked.expand(-1, 6, -1)  # (num_contour, 6, dim)
+                    # Flatten to match the indexing
+                    contour_expanded = contour_expanded.view(-1, contour_expanded.shape[-1])  # (num_contour*6, dim)
+                    decoder_input[contour_mask_flattened] = contour_expanded
+                
+                # Reshape back to original shape
+                decoder_input = decoder_input.view(decoded_language_tokens.shape[0], decoded_language_tokens.shape[1], -1)
+                
                 if self.if_add_metadata_in_decoder:
                     metadata_condition = self.model.supplementary_embedding_metadata(
                         torch.tensor([
                             additional_token_map[token.item()] 
                             for batch in metadata_condition # Iterate through the first 11 tokens in each batch
                             for token in batch                  # Iterate through each token in the batch
-                        ], device=input_ids.device, dtype=torch.long)
+                        ], device=decoded_language_tokens.device, dtype=torch.long)
                     ).reshape(metadata_condition.shape[0] , -1).unsqueeze(1)  # Reshape and move to the same device as input_ids #batch, 11 --> batch, 11, dim --> batch, 11*dim, --> batch, 1, 11*dim
                     metadata_condition_shrinked = self.gru_condition_layer(metadata_condition) #(batch, 1, 11*dim) --> (batch, 1, dim)
                     decoder_input = decoder_input+metadata_condition_shrinked
-                if self.if_add_chord_in_decoder:
-                    # bar_beat_chord_condition: batch*len, 3 --> batch*len, 1, dim
-                    bar_OH = F.one_hot(bar_beat_chord_condition[:, 0].long(), num_classes=self.bar_classes).to(input_ids) #(batch*len, bar_classes)
-                    beat_OH = F.one_hot(bar_beat_chord_condition[:, 1].long(), num_classes=self.beat_classes).to(input_ids) #(batch*len, beat_classes)
-                    #FME/WE:
-                    chord_condition = []
-                    for chord in [self.chord_idx2symbol[chord_idx.item()] for chord_idx in bar_beat_chord_condition[:, 2]]:
-                        if chord!="s":
-                            embedded_pitches = self.model.pitch_embedding(torch.tensor(chord_to_midi(chord)).unsqueeze(0).to(input_ids)) # (1, num_pitches, dim)
-                            chord_condition.append(embedded_pitches.sum(dim = 1)) # (1, dim)
-                        else: 
-                            chord_condition.append(self.chord_placeholder_embedding(torch.tensor([0], device=input_ids.device, dtype=torch.long))) # (1, dim)
-                    chord_condition_cat = torch.cat(chord_condition, dim = 0) # (batch*len, dim)
-                    bar_beat_chord_condition_cat = torch.cat([bar_OH, beat_OH, chord_condition_cat], dim = -1)
-                    bar_beat_chord_condition_cat_linear = self.chord_condition_layer(bar_beat_chord_condition_cat).unsqueeze(1)
-                    decoder_input = decoder_input+bar_beat_chord_condition_cat_linear
+                # if self.if_add_chord_in_decoder:
+                #     # bar_beat_chord_condition: batch*len, 3 --> batch*len, 1, dim
+                #     bar_OH = F.one_hot(bar_beat_chord_condition[:, 0].long(), num_classes=self.bar_classes).to(input_ids) #(batch*len, bar_classes)
+                #     beat_OH = F.one_hot(bar_beat_chord_condition[:, 1].long(), num_classes=self.beat_classes).to(input_ids) #(batch*len, beat_classes)
+                #     #FME/WE:
+                #     chord_condition = []
+                #     for chord in [self.chord_idx2symbol[chord_idx.item()] for chord_idx in bar_beat_chord_condition[:, 2]]:
+                #         if chord!="s":
+                #             embedded_pitches = self.model.pitch_embedding(torch.tensor(chord_to_midi(chord)).unsqueeze(0).to(input_ids)) # (1, num_pitches, dim)
+                #             chord_condition.append(embedded_pitches.sum(dim = 1)) # (1, dim)
+                #         else: 
+                #             chord_condition.append(self.chord_placeholder_embedding(torch.tensor([0], device=input_ids.device, dtype=torch.long))) # (1, dim)
+                #     chord_condition_cat = torch.cat(chord_condition, dim = 0) # (batch*len, dim)
+                #     bar_beat_chord_condition_cat = torch.cat([bar_OH, beat_OH, chord_condition_cat], dim = -1)
+                #     bar_beat_chord_condition_cat_linear = self.chord_condition_layer(bar_beat_chord_condition_cat).unsqueeze(1)
+                #     decoder_input = decoder_input+bar_beat_chord_condition_cat_linear
 
                 generation_logits_flattened, generation_hidden_state_flattened = self.decoder(decoder_input, decoded_hidden_state) #output: batch*len_x, len_y, dim ,  hidden state: num_layers, batch*len_x, dim
                 
-                generation_logits = generation_logits_flattened.view(decoded_language_tokens_encoded.shape[0],decoded_language_tokens_encoded.shape[1], -1) #batch*len_x, len_y, decode_vocab_size
-                generation_hidden_state = generation_hidden_state_flattened.view(self.decoder.num_hidden_layers, decoded_language_tokens_encoded.shape[0], -1) #num_layers, batch*len_x, dim
+                generation_logits = generation_logits_flattened.view(decoded_language_tokens.shape[0],decoded_language_tokens.shape[1], -1) #batch*len_x, len_y, decode_vocab_size
+                generation_hidden_state = generation_hidden_state_flattened.view(self.decoder.num_hidden_layers, decoded_language_tokens.shape[0], -1) #num_layers, batch*len_x, dim
                 generation_logits= self.lm_head(generation_logits)
                 generation_logits = generation_logits.float()
                 logits_shrinked = None

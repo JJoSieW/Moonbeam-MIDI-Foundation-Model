@@ -62,9 +62,9 @@ class commu_con_gen_dataset:
     dataset: str = "commu_con_gen_dataset"
     train_split: str = "train"
     test_split: str = "val"
-    data_dir: str = "dataset/preprocessed/commu"
-    csv_file: str = "dataset/preprocessed/commu/train_test_split.csv"
-    additional_token_dict_path: str = "dataset/preprocessed/commu/indexed_tokens_dict.json"
+    data_dir: str = "dataset/preprocessed/commu_selected_metadata"
+    csv_file: str = "dataset/preprocessed/commu_selected_metadata/train_test_split.csv"
+    additional_token_dict_path: str = "dataset/preprocessed/commu_selected_metadata/indexed_tokens_dict.json"
     if_add_chords_in_transformer: bool=True
     if_add_metadata_in_transformer: bool=True
     
